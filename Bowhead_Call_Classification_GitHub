@@ -1,0 +1,1337 @@
+---
+title: "Bowhead Call Classification Script"
+output: html_notebook
+---
+
+
+#Metadata and Data setup
+##Load packages
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(wesanderson)
+library(lubridate)
+library(ggExtra)
+library(viridis)
+library(factoextra)
+```
+
+
+##Load Data
+```{r}
+#Load raw data
+BH_Call_Data<- read_csv("/Directory/BH_Call_Data_20260217.csv")
+
+#Remove low quality calls and do last-minute cleaning
+BH_HQ_Data<-BH_Call_Data %>%
+  filter(Quality != "LOW") %>%
+  filter(Quality != "NA") %>%
+  droplevels() %>%
+  mutate(n_harmonics = as.numeric(n_harmonics),
+         n_inflections = as.numeric(n_inflections)) %>%
+  dplyr::mutate(site = factor(site, levels = c("CB50",
+                                               "CB300",
+                                               "PP",
+                                               "CP",
+                                               "FB",
+                                               "HI",
+                                               "SH",
+                                               "UL")))
+```
+
+
+
+
+
+#Random Forest Model
+##Load Packages
+```{r}
+#Load Packages
+library(randomForest)
+#library(reprtree) #not compatible with current versions of R
+library(rpart.plot)
+library(tidyverse)
+library(ggplot2)
+library(caret)
+```
+
+##Descriptive Statistics
+```{r}
+table(BH_HQ_Data$Call)
+
+#Select Variables
+Forest_Data <-BH_HQ_Data %>%
+  select(c(Delta_F,
+           Peak_F,
+           Min_Entropy,
+           Max_Entropy,
+           Delta_T, #Not improving fit
+           n_harmonics,
+           n_inflections,
+           start_f0,
+           end_f0,
+           min_f0,
+           max_f0,
+           max_t_relative,
+           min_t_relative,
+           Delta_f0_duration,
+           Delta_f0_abs,
+           Delta_f0_scope,
+           Call,
+           site,
+           year,
+           date)) %>% 
+  #dplyr::mutate(Call = str_replace(Call, "US_mod", "US"), #Removed these groupings as model accuracy was still quite high at 8 groups
+  #              Call = str_replace(Call, "DS_mod", "DS")) %>%
+                #Call = str_replace(Call, "HONK", "GROWL")) %>%
+  dplyr::filter(!(Call == "PLS")) %>%
+  dplyr::filter(!(Call == "HONK")) %>%
+  dplyr::mutate(Call = as.factor(Call))%>% 
+  droplevels()
+  #dplyr::filter(!(Call_Category == "Honk")) #This wasn't grouped in a previous iteration so was dropped
+
+
+#Get breakdown of site numbers
+table(Forest_Data$site)
+
+table(Forest_Data$Call)
+
+#  CB50 CB300    PP    CP    FB    HI    SH    UL 
+#  497   580   272   299    78   527    11    73 
+
+
+##Need specific breakdown for each year that CB sites were sampled
+Forest_CB50<-Forest_Data %>%
+  filter(site == "CB50")
+table(Forest_CB50$year)
+#2018 2019 
+# 460   37 
+
+Forest_CB300<-Forest_Data %>%
+  filter(site == "CB300")
+table(Forest_CB300$year)
+#2018 2019 
+# 467  113 
+
+#Breakdown of calls by site
+table(Forest_Data$Call, Forest_Data$site)
+
+#         CB50 CB300  PP  CP  FB  HI  SH  UL
+#  CAV      66    58  21  38  11 104   1  15
+#  CST      37   123  27  35   7  76   2   4
+#  DS      118    78  69  32  23  87   4  10
+#  DS_mod   25    28   6  12   0  29   1   5
+#  GROWL    51    77  25  26  13  19   0   7
+#  US      103   130  67  80  13 118   1  21
+#  US_mod   36    47  21  51   8  72   1   7
+#  VEX      61    39  36  25   3  23   1   4
+
+
+#remove site for analysis
+Forest_Data_clean <- Forest_Data %>%
+  dplyr::select(!("site")) %>%
+  dplyr::select(!("year")) %>%
+  dplyr::select(!("date")) %>%
+  droplevels() %>%
+  na.omit()
+
+#Breakdown of Calls
+table(Forest_Data_clean$Call)
+
+#  CAV    CST     DS DS_mod  GROWL     US US_mod    VEX 
+#  313    310    419    106    215    529    242    192
+
+#Summary to get column names
+str(Forest_Data_clean)
+
+#Call range
+grouped_ranges <- Forest_Data_clean %>%
+  group_by(Call) %>%
+  summarize(
+    # Calculate range for col1
+    DeltaF_min = min(Delta_F),
+    DeltaF_max = max(Delta_F),
+    Peak_F_min = min(Peak_F),
+    Peak_F_max = max(Peak_F),
+    Min_Entropy_min = min(Min_Entropy),
+    Min_Entropy_max = max(Min_Entropy),
+    Max_Entropy_min = min(Max_Entropy),
+    Max_Entropy_max = max(Max_Entropy),
+    Delta_T_min = min(Delta_T),
+    Delta_T_max = max(Delta_T),
+    n_harmonics_min = min(n_harmonics),
+    n_harmonics_max = max(n_harmonics),
+    n_inflections_min = min(n_inflections),
+    n_inflections_max = max(n_inflections),
+    start_f0_min = min(start_f0),
+    start_f0_max = max(start_f0),
+    end_f0_min = min(end_f0),
+    end_f0_max = max(end_f0),
+    min_f0_min = min(min_f0),
+    min_f0_max = max(min_f0),
+    max_f0_min = min(max_f0),
+    max_f0_max = max(max_f0),
+    max_t_relative_min = min(max_t_relative),
+    max_t_relative_max = max(max_t_relative),
+    min_t_relative_min = min(min_t_relative),
+    min_t_relative_max = max(min_t_relative),
+    Delta_f0_duration_min = min(Delta_f0_duration),
+    Delta_f0_duration_max = max(Delta_f0_duration),
+    Delta_f0_abs_min = min(Delta_f0_abs),
+    Delta_f0_abs_max = max(Delta_f0_abs),
+    Delta_f0_scope_min = min(Delta_f0_scope),
+    Delta_f0_scope_max = max(Delta_f0_scope)
+  )
+
+print(grouped_ranges)
+write.csv(grouped_ranges, "/Directory/BH_feature_range.csv", row.names = TRUE)
+```
+
+
+###Calls by Site bar plot - not in manuscript
+```{r}
+Forest_Figures <- Forest_Data %>%
+  unite(col = "site_year", site, year, sep = " ", remove = FALSE) %>%
+  mutate(site_year = fct_relevel(site_year,
+                                 "CB50 2018",
+                                 "CB300 2018",
+                                 "PP 2018",
+                                 "CB50 2019",
+                                 "CB300 2019",
+                                 "CP 2019",
+                                 "FB 2019",
+                                 "HI 2019",
+                                 "SH 2020",
+                                 "UL 2020")) %>%
+  mutate(Call = fct_relevel(Call,
+                                 "CST",
+                                 "US",
+                                 "US_mod",
+                                 "DS",
+                                 "DS_mod",
+                                 "GROWL",
+                                 "CAV",
+                                 "VEX")) %>%
+  na.omit()
+Forest_Figures
+
+#Fix 2018 Dates caused by factory reset when deploying
+##CB50 is off by 17753 days
+##CB300 by 5307 days
+##PP by 6080 days
+
+##CB50
+Forest_2018_CB50 <- Forest_Figures %>%
+  group_by(site_year) %>%
+  filter(site_year == "CB50 2018") %>% # Isolate the specific subset
+  mutate(date = date + days(17753)) %>% # Perform the function on the subset
+  ungroup() # Remove the grouping structure
+
+# Combine the modified subset with the original data for other groups
+Forest_Figures <- bind_rows(
+  Forest_2018_CB50,
+  Forest_Figures %>% filter(site_year != "CB50 2018")
+)
+
+##CB300
+Forest_2018_CB300 <- Forest_Figures %>%
+  group_by(site_year) %>%
+  filter(site_year == "CB300 2018") %>% # Isolate the specific subset
+  mutate(date = date + days(5307)) %>% # Perform the function on the subset
+  ungroup() # Remove the grouping structure
+
+# Combine the modified subset with the original data for other groups
+Forest_Figures <- bind_rows(
+  Forest_2018_CB300,
+  Forest_Figures %>% filter(site_year != "CB300 2018")
+)
+
+
+##PP
+Forest_2018_PP <- Forest_Figures %>%
+  group_by(site_year) %>%
+  filter(site_year == "PP 2018") %>% # Isolate the specific subset
+  mutate(date = date + days(6080)) %>% # Perform the function on the subset
+  ungroup() # Remove the grouping structure
+
+# Combine the modified subset with the original data for other groups
+Forest_Figures <- bind_rows(
+  Forest_2018_PP,
+  Forest_Figures %>% filter(site_year != "PP 2018")
+)
+
+#Extract just month and day
+Forest_Figures<- Forest_Figures %>%
+  mutate(date_month = ymd(paste("2000", format(date, "%m-%d"))))
+
+str(Forest_Figures)
+
+#Bar graph
+Calls_Site<-ggplot(data = Forest_Figures, aes(x = site, fill = Call)) +
+  geom_bar(stat = "count", position = "dodge", color = "black") +
+  facet_wrap(year ~ ., scales = "free_x") +
+  scale_fill_viridis_d() +
+  theme_classic() +
+  scale_y_continuous(expand = expansion(mult = 0, add = 0))
+Calls_Site #This is way too much --> Maybe best placed in a supplementary table
+
+#Breakdown of calls by site
+table(Forest_Figures$Call, Forest_Figures$site_year)
+
+#        CB50 2018 CB300 2018 PP 2018 CB50 2019 CB300 2019 CP 2019 FB 2019 HI 2019 SH 2020
+#  CST           35         93      27         2         29      35       7      76       2
+#  US            93        102      66         8         27      80      13     118       1
+#  US_mod        34         42      21         2          5      51       8      72       1
+#  DS           107         57      68        10         21      32      23      87       4
+#  DS_mod        22         22       6         3          6      12       0      29       1
+#  GROWL         46         65      25         5         10      26      13      18       0
+#  CAV           63         47      21         3         10      38      11     104       1
+#  VEX           57         34      36         4          5      25       3      22       1
+#        
+#         UL 2020
+#  CST          4
+#  US          21
+#  US_mod       7
+#  DS          10
+#  DS_mod       5
+#  GROWL        7
+#  CAV         15
+#  VEX          4
+
+
+#Descriptive stats for each call
+Call_Summary_table <- Forest_Data_clean %>%
+  group_by(Call) %>% 
+  summarize(across(everything(), function(x) {
+    paste(round(mean(x),2), "\u00b1", round(sd(x), 2))}))
+
+write.csv(Call_Summary_table, "/Directory/BH_Calls_Summary_20260218.csv", row.names = TRUE)
+```
+
+
+### Call Type - Donut plot
+```{r}
+table(Forest_Data_clean$Call)
+#.  CAV    CST     DS DS_mod  GROWL     US US_mod    VEX 
+#   313    310    419    106    215    529    242    191 
+
+#Need to make a new dataframe with separate columns for categories and counts
+Call_Counts<- data.frame(
+  Call = c("Constant", "Up-sweep", "Modified Up-sweep", "Down-sweep", "Modified Down-sweep", "Growl", "Concave", "Convex"),
+  Counts = c(310, 529, 242, 419, 106, 215, 313, 191)
+)
+
+Call_Counts<-Call_Counts %>% 
+  dplyr::mutate(Call = factor(Call, levels = c("Constant", "Up-sweep", "Modified Up-sweep", "Down-sweep", "Modified Down-sweep", "Growl", "Concave", "Convex")))
+
+# Compute percentages
+Call_Counts$fraction = Call_Counts$Counts / sum(Call_Counts$Counts)
+
+# Compute the cumulative percentages (top of each rectangle)
+Call_Counts$ymax = cumsum(Call_Counts$fraction)
+
+# Compute the bottom of each rectangle
+Call_Counts$ymin = c(0, head(Call_Counts$ymax, n=-1))
+
+#Compute label positions
+Call_Counts$labelPosition <- (Call_Counts$ymax + Call_Counts$ymin) /2
+
+BH_Call_Donut<- ggplot(Call_Counts,
+                       aes(ymax=ymax,
+                           ymin=ymin,
+                           xmax=4,
+                           xmin=3,
+                           fill=Call)) +
+  geom_rect() +
+  coord_polar(theta="y") + # Try to remove that to understand how the chart is built initially
+  xlim(c(2,
+         4)) + # Try to remove that to see how to make a pie chart
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  geom_label(x = 3.5,
+              aes(y = labelPosition,
+                  label = Counts),
+              size = 8,
+              color = "white",
+              fontface = "bold", 
+              fill = "black") +
+  guides(fill = guide_legend(title = "Call Category",
+                             override.aes = aes(label = "")))+
+  theme_void() +
+  theme(legend.text = element_text(size= 24),
+        legend.title = element_text(size = 28))
+    #legend.position = "none")
+BH_Call_Donut
+
+##NO background
+ggsave(
+  "/Directory/BH_Call_Donut_20260213.png",
+  BH_Call_Donut,
+  width = 26,
+  height = 19,
+  units = "cm"
+)
+```
+
+
+### Date - Histogram
+```{r}
+library(viridis)
+str(Forest_Figures)
+
+ggplot(Forest_Figures, aes(x = date, y = after_stat(count), fill = site)) +
+  geom_density()+
+  facet_wrap(year ~ ., scales = "free_x") +
+  scale_color_viridis_d(aes(color = "black"))+
+  scale_fill_viridis_d(option = "viridis", direction = -1, alpha = 0.4)+
+  scale_x_date(date_labels = "%b") +
+  theme_classic()
+
+#Not really that informative, best to leave out
+
+#Stacked histogram
+Call_Histogram<- ggplot(Forest_Figures, aes(x = date_month, fill = Call)) + geom_histogram(binwidth = 7, color = "black") + # binwidth = 7 for weekly bins
+  scale_fill_viridis_d(option = "viridis", direction = -1)+
+  scale_x_date(date_breaks = "2 months",
+               date_labels = "%B",
+               name = "Recording Date") +
+  theme_classic() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 12),
+        axis.title.x = element_text(size = 16),
+        axis.text.y = element_text(size = 12),
+        axis.title.y = element_text(size = 16)) +
+  scale_y_continuous(name ="Call Count",
+                     limits = c(0,250),
+                     expand = expansion(mult = 0, add = 0))
+Call_Histogram
+
+
+ggsave(
+  "/Directory/BH_Call_Histogram_20260407.png",
+  Call_Histogram,
+  width = 26,
+  height = 19,
+  units = "cm"
+)
+```
+
+
+##Run Model
+```{r}
+#Create Training and Testing Datasets with a 80-20 split
+set.seed(2025) #Ensure reproducibility of random sample with a set seed
+samp <- sample(nrow(Forest_Data_clean), 0.8 * nrow(Forest_Data_clean))
+train <- Forest_Data_clean[samp, ]
+test <- Forest_Data_clean[-samp, ]
+
+#Quick check of training and testing dimensions
+dim(train) #1860 data points
+str(train)
+table(train$Call)
+dim(test) #466 data points
+table(test$Call)
+
+#Generate random forest model (default n = 10,000 iterations)
+RFmodel1 <- randomForest(Call~., data = train, proximity=TRUE, ntree = 10000)
+
+summary(RFmodel1)
+RFmodel1
+
+RFmodel1$confusion
+
+
+p1 <- predict(RFmodel1, train)
+p2 <- predict(RFmodel1, test)
+
+confusionMatrix(p1, train$Call) #100% accuracy on train
+confusionMatrix(p2, test$Call) #86.05% accuracy on test
+
+#Confusion Matrix and Statistics
+
+#          Reference
+#                     Class: CAV Class: CST Class: DS Class: DS_mod Class: GROWL Class: US
+#Sensitivity              0.9310     0.9000    0.8659       0.72727      0.88235    0.9279
+#Specificity              0.9632     0.9729    0.9922       0.98874      0.98072    0.9831
+#Pos Pred Value           0.7826     0.8308    0.9595       0.76190      0.84906    0.9450
+#Neg Pred Value           0.9899     0.9850    0.9719       0.98652      0.98547    0.9776
+#Prevalence               0.1245     0.1288    0.1760       0.04721      0.10944    0.2382
+#Detection Rate           0.1159     0.1159    0.1524       0.03433      0.09657    0.2210
+#Detection Prevalence     0.1481     0.1395    0.1588       0.04506      0.11373    0.2339
+#Balanced Accuracy        0.9471     0.9365    0.9290       0.85801      0.93154    0.9555
+#                     Class: US_mod Class: VEX
+#Sensitivity                0.78571    0.62500
+#Specificity                0.96934    0.99061
+#Pos Pred Value             0.71739    0.86207
+#Neg Pred Value             0.97857    0.96568
+#Prevalence                 0.09013    0.08584
+#Detection Rate             0.07082    0.05365
+#Detection Prevalence       0.09871    0.06223
+#Balanced Accuracy          0.87753    0.80781
+
+#Overall Statistics
+                                          
+#               Accuracy : 0.8605          
+#                 95% CI : (0.8257, 0.8907)
+#    No Information Rate : 0.2382          
+#    P-Value [Acc > NIR] : < 2.2e-16       
+#                                          
+#                  Kappa : 0.8361          
+#                                          
+# Mcnemar's Test P-Value : NA              
+
+#Statistics by Class:
+#
+#                     Class: CAV Class: CST Class: DS Class: GROWL Class: US Class: VEX
+#Sensitivity              0.8378     0.8824    0.9623      0.85714    0.9589    0.58333
+#Specificity              0.9689     0.9898    0.9661      0.99522    0.9554    0.99541
+#Pos Pred Value           0.8378     0.9375    0.8947      0.94737    0.9091    0.87500
+#Neg Pred Value           0.9689     0.9798    0.9884      0.98578    0.9804    0.97748
+#Prevalence               0.1609     0.1478    0.2304      0.09130    0.3174    0.05217
+#Detection Rate           0.1348     0.1304    0.2217      0.07826    0.3043    0.03043
+#Detection Prevalence     0.1609     0.1391    0.2478      0.08261    0.3348    0.03478
+#Balanced Accuracy        0.9034     0.9361    0.9642      0.92618    0.9572    0.78937
+
+hist(treesize(RFmodel1),
+     main = "No. of Nodes for the Trees",
+     col = "green")
+
+#Variable Importance
+varImpPlot(RFmodel1,
+           sort = T,
+           n.var = 16,
+           main = "Top 11 - Variable Importance")
+RF_MDG<-importance(RFmodel1)
+RF_MDG
+
+write.csv(RF_MDG, "/Directory/RF_MDG_20260217.csv", row.names = TRUE)
+
+MDSplot(RFmodel1, train$Call)
+plot(RFmodel1)
+
+
+
+
+
+
+RFmodel2 <- rpart(Call ~., data = train)
+
+# plot the tree
+Dendro_FEB17<-prp(RFmodel2,
+                  type = 0,
+                  fallen.leaves = TRUE,
+                  branch = 1,
+                  uniform = TRUE,
+                  varlen = 14,
+                  Margin = 0.2,
+                  space = 1.2,
+                  gap = NULL,
+                  trace = TRUE,
+                  box.palette = "YlGnBl",
+                  round = 0.5,
+                  shadow.col = "gray",
+                  split.cex = 1.5,
+                  branch.lwd = 2,
+                  legend.x = 0.0,
+                  legend.y =NULL,
+                  legend.cex = 1.2,
+                  tweak = 1.05)
+
+Dendro_FEB17
+```
+
+
+#Call Type Descriptive Stats
+##Clean up data for plotting
+```{r}
+Forest_Data_clean<-Forest_Data_clean %>%
+  mutate(Call = fct_relevel(Call,
+                                 "CST",
+                                 "US",
+                                 "US_mod",
+                                 "DS",
+                                 "DS_mod",
+                                 "GROWL",
+                                 "CAV",
+                                 "VEX"))
+```
+
+
+##a) Delta F0
+```{r}
+library(data.table)
+setDT(Forest_Data_clean)
+Forest_Data_clean[, as.list(summary(Delta_f0_duration)), by = "Call"]
+
+#Delta_F0_Duration Boxplot
+Delta_f0_boxplot<-ggplot(Forest_Figures,
+                         aes(x=Call,
+                             y = Delta_f0_duration,
+                             fill = Call)) +
+  geom_vline(xintercept = 1.5)+
+  geom_rect(aes(xmin=1.5, xmax=2.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 2.5)+
+  geom_vline(xintercept = 3.5)+
+  geom_rect(aes(xmin=3.5, xmax=4.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 4.5)+
+  geom_vline(xintercept = 5.5)+
+  geom_rect(aes(xmin=5.5, xmax=6.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 6.5)+
+  geom_vline(xintercept = 7.5)+
+  geom_rect(aes(xmin=7.5, xmax=8.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 8.5)+
+  geom_boxplot(outlier.shape = NA,
+               notch = FALSE) +
+  geom_jitter(shape=16, size = 0.7,
+              position=position_jitter(0.2),
+              aes(alpha = 0.9)) +
+  #scale_y_continuous(limits = quantile(Forest_Data_clean$Delta_f0_duration, c(0.1, 0.9))) +
+  scale_x_discrete(labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex")) +
+  theme_classic() +
+  scale_fill_viridis_d(option = "viridis",
+                       name = "Call Category",
+                       labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex"),
+                       direction = -1) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.y = element_blank(),
+        plot.margin = ggplot2::margin(t = 1, r = 0.5, unit = "cm"))+
+  ylab("Delta F0 (Hz)") +
+  xlab("Call Category") +
+  coord_flip()
+
+
+Delta_f0_boxplot
+
+#Test differences
+library(lmerTest)
+library(car)
+library(DHARMa)
+library(glmmTMB)
+
+##Distribution
+hist(Forest_Figures$Delta_f0_duration)
+
+##Normal distributoin
+Delta_F0_model<-lmer((Delta_f0_duration)^(1/3)~Call+(1|site_year), data = Forest_Figures)
+
+
+plot(Delta_F0_model)
+
+qqnorm(resid(Delta_F0_model))
+qqline(resid(Delta_F0_model))
+
+#Diagnostics
+par(mfrow = c(2, 2))
+plot(Delta_F0_model)
+##Residual plot not bad, reasonable linearity
+
+Delta_F0_resids <- simulateResiduals(fittedModel = Delta_F0_model, plot = F)
+plot(Delta_F0_resids)
+##QQ plot not following fit, residuals not normally distributed
+##not looking good
+
+summary(Delta_F0_model)
+
+#for creating table
+library(gtsummary)
+Delta_f0_table<-tbl_regression(Delta_F0_model)
+Delta_f0_table
+#posthoc
+library(emmeans)
+# Calculate marginal means for a factor
+Delta_F0_mmeans <- emmeans(Delta_F0_model, "Call")
+
+# Display results with confidence intervals
+confint(Delta_F0_mmeans)
+
+ggplot(as.data.frame(Delta_F0_mmeans), aes(x = Call, y = emmean)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 1)
+
+
+#Save Figure
+ggsave(
+  "/Directory/DeltaF0_BoxPlot_20260218.png",
+  Delta_f0_boxplot,
+  width = 26,
+  height = 19,
+  units = "cm"
+)
+```
+
+##b) Max F0 Position
+```{r}
+library(data.table)
+setDT(Forest_Data_clean)
+Forest_Data_clean[, as.list(summary(Max_Entropy)), by = "Call"]
+
+#Max F0 position boxplot
+maxT_f0_boxplot<-ggplot(Forest_Figures,
+                         aes(x=Call,
+                             y = max_t_relative,
+                             fill = Call)) +
+  geom_vline(xintercept = 1.5)+
+  geom_rect(aes(xmin=1.5, xmax=2.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 2.5)+
+  geom_vline(xintercept = 3.5)+
+  geom_rect(aes(xmin=3.5, xmax=4.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 4.5)+
+  geom_vline(xintercept = 5.5)+
+  geom_rect(aes(xmin=5.5, xmax=6.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 6.5)+
+  geom_vline(xintercept = 7.5)+
+  geom_rect(aes(xmin=7.5, xmax=8.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 8.5)+
+  geom_boxplot(outlier.shape = NA,
+               notch = FALSE) +
+  geom_jitter(shape=16, size = 0.7,
+              position=position_jitter(0.2),
+              aes(alpha = 0.9)) +
+  #scale_y_continuous(limits = quantile(Forest_Data_clean$Delta_f0_duration, c(0.1, 0.9))) +
+  scale_x_discrete(labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex")) +
+  theme_classic() +
+  scale_fill_viridis_d(option = "viridis",
+                       name = "Call Category",
+                       labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex"),
+                       direction = -1) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.y = element_blank(),
+        plot.margin = ggplot2::margin(t = 1, r = 1, unit = "cm"))+
+  ylab("Maximum F0 Position (Relative Position)") +
+  xlab("Call Category") +
+  coord_flip()
+
+maxT_f0_boxplot
+
+#Test differences
+##Distribution
+hist(Forest_Figures$max_t_relative)
+##bimodal distribution --> go with the ordered beta distribution again
+
+#GLM model with ordered beta distribution --> literally the perfect distribution for these data (again)
+maxT_model<-glmmTMB(max_t_relative~Call+(1|site_year), family = ordbeta(link = "logit"), data = Forest_Figures)
+
+#Diagnostics
+qqnorm(resid(maxT_model))
+qqline(resid(maxT_model))
+maxT_F0_resids <- simulateResiduals(fittedModel = maxT_model, plot = F)
+plot(maxT_F0_resids) #not great for this one, but I doubt I can get it any better given the nature of these data
+
+summary(maxT_model)
+
+#for creating table
+library(gtsummary)
+maxT_f0_table<-tbl_regression(maxT_model)
+maxT_f0_table
+
+
+#posthoc
+library(emmeans)
+# Calculate marginal means for a factor
+maxT_F0_mmeans <- emmeans(maxT_model, "Call")
+
+# Display results with confidence intervals
+confint(maxT_F0_mmeans)
+
+ggplot(as.data.frame(maxT_F0_mmeans), aes(x = Call, y = emmean)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 1)
+
+#Save Figure
+ggsave(
+  "/Directory/maxT_BoxPlot_20260218.png",
+  maxT_f0_boxplot,
+  width = 26,
+  height = 19,
+  units = "cm"
+)
+```
+
+
+##c) Min F0 Position
+```{r}
+library(data.table)
+setDT(Forest_Data_clean)
+Forest_Data_clean[, as.list(summary(min_t_relative)), by = "Call"]
+
+#Min T
+minT_f0_boxplot<-ggplot(Forest_Figures,
+                         aes(x=Call,
+                             y = min_t_relative,
+                             fill = Call)) +
+  geom_vline(xintercept = 1.5)+
+  geom_rect(aes(xmin=1.5, xmax=2.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 2.5)+
+  geom_vline(xintercept = 3.5)+
+  geom_rect(aes(xmin=3.5, xmax=4.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 4.5)+
+  geom_vline(xintercept = 5.5)+
+  geom_rect(aes(xmin=5.5, xmax=6.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 6.5)+
+  geom_vline(xintercept = 7.5)+
+  geom_rect(aes(xmin=7.5, xmax=8.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 8.5)+
+  geom_boxplot(outlier.shape = NA,
+               notch = FALSE) +
+  geom_jitter(shape=16, size = 0.7,
+              position=position_jitter(0.2),
+              aes(alpha = 0.9)) +
+  #scale_y_continuous(limits = quantile(Forest_Data_clean$Delta_f0_duration, c(0.1, 0.9))) +
+  scale_x_discrete(labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex")) +
+  theme_classic() +
+  scale_fill_viridis_d(option = "viridis",
+                       name = "Call Category",
+                       labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex"),
+                       direction = -1) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.y = element_blank(),
+        plot.margin = ggplot2::margin(t = 1, r = 0.5, unit = "cm"))+
+  ylab("Minimum F0 Position (Relative Position)") +
+  xlab("Call Category") +
+  coord_flip()
+
+minT_f0_boxplot
+
+#Test differences - initial assumption was ton use GLM with Poisson distribution for these data
+##Distribution
+hist(Forest_Figures$min_t_relative)
+##bimodal distribution of propotion data --> use GLM
+
+#GLM model with ordered beta distribution --> literally the perfect distribution for these data!
+minT_model<-glmmTMB(min_t_relative~Call+(1|site_year), family = ordbeta(link = "logit"), data = Forest_Figures)
+
+#Diagnostics
+qqnorm(resid(minT_model))
+qqline(resid(minT_model))
+minT_F0_resids <- simulateResiduals(fittedModel = minT_model, plot = F)
+plot(minT_F0_resids)
+
+summary(minT_model)
+
+#for creating table
+library(gtsummary)
+minT_f0_table<-tbl_regression(minT_model)
+minT_f0_table
+
+
+#posthoc
+library(emmeans)
+# Calculate marginal means for a factor
+minT_F0_mmeans <- emmeans(minT_model, "Call")
+
+# Display results with confidence intervals
+confint(minT_F0_mmeans)
+
+ggplot(as.data.frame(minT_F0_mmeans), aes(x = Call, y = emmean)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 1)
+
+
+#Save Figure
+ggsave(
+  "/Directory/minT_BoxPlot_20260217.png",
+  minT_f0_boxplot,
+  width = 26,
+  height = 19,
+  units = "cm"
+)
+```
+
+
+##d) N_inflections
+```{r}
+library(data.table)
+setDT(Forest_Data_clean)
+Forest_Data_clean[, as.list(summary(Delta_f0_abs)), by = "Call"]
+
+#N_inflections
+Inflections_f0_boxplot<-ggplot(Forest_Figures,
+                         aes(x=Call,
+                             y = n_inflections,
+                             fill = Call)) +
+  geom_vline(xintercept = 1.5)+
+  geom_rect(aes(xmin=1.5, xmax=2.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 2.5)+
+  geom_vline(xintercept = 3.5)+
+  geom_rect(aes(xmin=3.5, xmax=4.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 4.5)+
+  geom_vline(xintercept = 5.5)+
+  geom_rect(aes(xmin=5.5, xmax=6.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 6.5)+
+  geom_vline(xintercept = 7.5)+
+  geom_rect(aes(xmin=7.5, xmax=8.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 8.5)+
+  geom_boxplot(outlier.shape = NA,
+               notch = FALSE) +
+  geom_jitter(shape=16, size = 0.7,
+              position=position_jitter(0.2),
+              aes(alpha = 0.9)) +
+  #scale_y_continuous(limits = quantile(Forest_Data_clean$Delta_f0_duration, c(0.1, 0.9))) +
+  scale_x_discrete(labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex")) +
+  theme_classic() +
+  scale_fill_viridis_d(option = "viridis",
+                       name = "Call Category",
+                       labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex"),
+                       direction = -1) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.y = element_blank(),
+        plot.margin = ggplot2::margin(t = 1, r = 0.5, unit = "cm"))+
+  ylab("Inflection Points (n)") +
+  xlab("Call Category") +
+  coord_flip()
+
+Inflections_f0_boxplot
+
+#Test differences - use GLM with Poisson distribution for these data
+##Distribution
+hist(Forest_Figures$n_inflections)
+##very right skewed
+
+
+
+#GLM model with poisson distribution
+Inflection_model<-glmmTMB(n_inflections~Call+(1|site_year), family = nbinom1(link = "log"), data = Forest_Figures)
+
+#Diagnostics
+qqnorm(resid(Inflection_model))
+qqline(resid(Inflection_model))
+Inflection_F0_resids <- simulateResiduals(fittedModel = Inflection_model, plot = F)
+plot(Inflection_F0_resids)
+
+summary(Inflection_model)
+
+#for creating table
+library(gtsummary)
+Inflection_f0_table<-tbl_regression(Inflection_model)
+Inflection_f0_table
+
+
+#posthoc
+library(emmeans)
+# Calculate marginal means for a factor
+Inflection_F0_mmeans <- emmeans(Inflection_model, "Call")
+
+# Display results with confidence intervals
+confint(Inflection_F0_mmeans)
+
+ggplot(as.data.frame(Inflection_F0_mmeans), aes(x = Call, y = emmean)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 1)
+
+
+#Save Figure
+ggsave(
+  "/Directory/Inflection_BoxPlot_20260218.png",
+  Inflections_f0_boxplot,
+  width = 26,
+  height = 19,
+  units = "cm"
+)
+```
+
+
+##e) F0 range
+```{r}
+library(data.table)
+setDT(Forest_Data_clean)
+Forest_Data_clean[, as.list(summary(Delta_f0_abs)), by = "Call"]
+
+#Delta_F0_abs Boxplot
+Range_f0_boxplot<-ggplot(Forest_Figures,
+                         aes(x=Call,
+                             y = Delta_f0_abs,
+                             fill = Call)) +
+  geom_vline(xintercept = 1.5)+
+  geom_rect(aes(xmin=1.5, xmax=2.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 2.5)+
+  geom_vline(xintercept = 3.5)+
+  geom_rect(aes(xmin=3.5, xmax=4.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 4.5)+
+  geom_vline(xintercept = 5.5)+
+  geom_rect(aes(xmin=5.5, xmax=6.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 6.5)+
+  geom_vline(xintercept = 7.5)+
+  geom_rect(aes(xmin=7.5, xmax=8.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 8.5)+
+  geom_boxplot(outlier.shape = NA,
+               notch = FALSE) +
+  geom_jitter(shape=16, size = 0.7,
+              position=position_jitter(0.2),
+              aes(alpha = 0.9)) +
+  #scale_y_continuous(limits = quantile(Forest_Data_clean$Delta_f0_duration, c(0.1, 0.9))) +
+  scale_x_discrete(labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex")) +
+  theme_classic() +
+  scale_fill_viridis_d(option = "viridis",
+                       name = "Call Category",
+                       labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex"),
+                       direction = -1) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.y = element_blank(),
+        plot.margin = ggplot2::margin(t = 1, r = 0.5, unit = "cm"))+
+  ylab("F0 Range (Hz)") +
+  xlab("Call Category") +
+  coord_flip()
+
+Range_f0_boxplot
+
+#Test differences
+##Distribution
+hist(Forest_Figures$Delta_f0_abs)
+##very right skewed
+
+##Normal distributoin
+Range_F0_model<-lmer(Delta_f0_abs^(1/3)~Call+(1|site_year), data = Forest_Figures)
+
+
+plot(Range_F0_model)
+
+qqnorm(resid(Range_F0_model))
+qqline(resid(Range_F0_model))
+
+Range_F0_resids <- simulateResiduals(fittedModel = Range_F0_model, plot = F)
+plot(Range_F0_resids)
+##QQ plot not following fit, residuals not normally distributed
+##high heteroskedasticity
+
+#Diagnostics
+par(mfrow = c(2, 2))
+plot(Range_F0_model)
+##Residual plot not great, needs to be transformed
+##QQ plot not following fit, residuals not normally distributed
+##Scale-location plot has reasonably equally distributed obs, suggesting reasonable homoscedasticity
+##Leverage plot and Cook's distances look good!
+
+#GLM
+?family_glmmTMB
+Range_F0_GLM<-glmmTMB((Delta_f0_abs)^(1/3)~Call+(1|site_year), family = t_family(link = "identity") ,data = Forest_Figures)
+
+qqnorm(resid(Range_F0_GLM))
+qqline(resid(Range_F0_GLM))
+Range_F0_resids <- simulateResiduals(fittedModel = Range_F0_GLM, plot = F)
+plot(Range_F0_resids)
+
+
+summary(Range_F0_GLM)
+
+
+#for creating table
+library(gtsummary)
+Range_f0_table<-tbl_regression(Range_F0_GLM)
+Range_f0_table
+
+
+#posthoc
+library(emmeans)
+# Calculate marginal means for a factor
+Range_F0_mmeans <- emmeans(Range_F0_GLM, "Call")
+
+# Display results with confidence intervals
+confint(Range_F0_mmeans)
+
+ggplot(as.data.frame(Range_F0_mmeans), aes(x = Call, y = emmean)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 1)
+
+
+#Save Figure
+ggsave(
+  "/Directory/RangeF0_BoxPlot_20260218.png",
+  Range_f0_boxplot,
+  width = 26,
+  height = 19,
+  units = "cm"
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+##f) F0 Variation
+```{r}
+#Examining data in tabular format first
+library(data.table)
+setDT(Forest_Data_clean)
+Forest_Data_clean[, as.list(summary(Max_Entropy)), by = "Call"]
+
+#F0 variation
+Var_f0_boxplot<-ggplot(Forest_Figures,
+                         aes(x=Call,
+                             y = Delta_f0_scope,
+                             fill = Call)) +
+  geom_vline(xintercept = 1.5)+
+  geom_rect(aes(xmin=1.5, xmax=2.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 2.5)+
+  geom_vline(xintercept = 3.5)+
+  geom_rect(aes(xmin=3.5, xmax=4.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 4.5)+
+  geom_vline(xintercept = 5.5)+
+  geom_rect(aes(xmin=5.5, xmax=6.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 6.5)+
+  geom_vline(xintercept = 7.5)+
+  geom_rect(aes(xmin=7.5, xmax=8.5, ymin=-Inf, ymax=Inf), fill="#D3D3D3", alpha=0.01)+
+  geom_vline(xintercept = 8.5)+
+  geom_boxplot(outlier.shape = NA,
+               notch = FALSE) +
+  geom_jitter(shape=16, size = 0.7,
+              position=position_jitter(0.2),
+              aes(alpha = 0.9)) +
+  #scale_y_continuous(limits = quantile(Forest_Data_clean$Delta_f0_duration, c(0.1, 0.9))) +
+  scale_x_discrete(labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex")) +
+  theme_classic() +
+  scale_fill_viridis_d(option = "viridis",
+                       name = "Call Category",
+                       labels = c("Constant",
+                              "Up-sweep",
+                              "Modified Up-sweep",
+                              "Down-sweep",
+                              "Modified Down-sweep",
+                              "Growl",
+                              "Concave",
+                              "Convex"),
+                       direction = -1) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.y = element_blank(),
+        plot.margin = ggplot2::margin(t = 1, r = 0.5, unit = "cm"))+
+  ylab("Variation in F0 within call (Hz)") +
+  xlab("Call Category") +
+  coord_flip()
+
+Var_f0_boxplot
+
+#Test differences - initial assumption is to use GLM with Poisson distribution for these data
+##Distribution
+hist(Forest_Figures$Delta_f0_scope)
+##right skewed distribution
+
+#Attempt a linear mixed model
+F0Var_model<-lmer((Delta_f0_scope)~Call+(1|site_year), data = Forest_Figures)
+
+qqnorm(resid(F0Var_model))
+qqline(resid(F0Var_model))
+F0Var_F0_resids <- simulateResiduals(fittedModel = F0Var_model, plot = F)
+plot(F0Var_F0_resids)#Nope, trying out some transformations. Nope, going glmer
+
+#GLM model with zero-inflated negative binomial
+F0Var_GLM<-glmmTMB(Delta_f0_scope~Call+(1|site_year), family = nbinom2, ziformula = ~1, data = Forest_Figures)
+
+#Diagnostics
+qqnorm(resid(F0Var_GLM))
+qqline(resid(F0Var_GLM))
+F0Var_F0_resids <- simulateResiduals(fittedModel = F0Var_GLM, plot = F)
+plot(F0Var_F0_resids) #zero-inflated negative binomial is about as good as I can get it
+
+summary(F0Var_GLM)
+
+
+#for creating table
+library(gtsummary)
+Var_f0_table<-tbl_regression(F0Var_GLM)
+Var_f0_table
+
+#posthoc
+library(emmeans)
+# Calculate marginal means for a factor
+F0Var_F0_mmeans <- emmeans(F0Var_GLM, "Call")
+
+# Display results with confidence intervals
+confint(F0Var_F0_mmeans)
+
+ggplot(as.data.frame(F0Var_F0_mmeans), aes(x = Call, y = emmean)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 1)
+
+
+#Save Figure
+ggsave(
+  "/Directory/Var_BoxPlot_20260218.png",
+  Var_f0_boxplot,
+  width = 26,
+  height = 19,
+  units = "cm"
+)
+```
+
+##Cowplot them together
+```{r}
+library(gridExtra) #for adjusting placement and features
+library(cowplot) #allows discrete placement into a tidy grid
+
+Feature_Grid<-plot_grid(Delta_f0_boxplot,
+                        maxT_f0_boxplot,
+                        minT_f0_boxplot,
+                        Inflections_f0_boxplot,
+                        Range_f0_boxplot,
+                        Var_f0_boxplot,
+                        labels=c("a)",
+                                 "b)",
+                                 "c)",
+                                 "d)",
+                                 "e)",
+                                 "f)"),
+                        label_size = 24,
+                        hjust = -4,
+                        ncol = 2, nrow = 3,
+                        align = "hv",   
+                        axis = "tblr")
+
+Feature_Grid
+
+#Save Figure
+ggsave(
+  "/Directory/Features_BoxPlot_20260407.png",
+  Feature_Grid,
+  width = 38,
+  height = 55,
+  units = "cm"
+)
+
+#As two separate columns to fine-tune placement manually
+Feature_Grid_ace<-plot_grid(Delta_f0_boxplot,
+                        minT_f0_boxplot,
+                        Range_f0_boxplot,
+                        labels=c("a)",
+                                 "c)",
+                                 "e)"),
+                        label_size = 24,
+                        label_x = 0.25,
+                        ncol = 1, nrow = 3,
+                        align = "hv",   
+                        axis = "tblr")
+
+Feature_Grid_ace
+#Save Figure
+ggsave(
+  "/Directory/Features_BoxPlot_ACE_20260407.png",
+  Feature_Grid_ace,
+  width = 20,
+  height = 55,
+  units = "cm"
+)
+
+Feature_Grid_bdf<-plot_grid(maxT_f0_boxplot,
+                        Inflections_f0_boxplot,
+                        Var_f0_boxplot,
+                        labels=c("b)",
+                                 "d)",
+                                 "f)"),
+                        label_size = 24,
+                        label_x = 0.25,
+                        ncol = 1, nrow = 3,
+                        align = "hv",   
+                        axis = "tblr")
+
+Feature_Grid_bdf
+#Save Figure
+ggsave(
+  "/Directory/Features_BoxPlot_BDF_20260407.png",
+  Feature_Grid_bdf,
+  width = 20,
+  height = 55,
+  units = "cm"
+)
+```
+
+
+
+
